@@ -130,6 +130,18 @@ def main():
         processing_class=tokenizer,
     )
 
+    # T4 실측 크래시 대응(2026-08-01): trl이 양자화 모델의 LoRA 파라미터를
+    # bf16으로 자동 캐스팅하는데, T4의 fp16 GradScaler는 bf16 그래디언트를
+    # unscale하는 CUDA 커널이 없다("_amp_foreach_non_finite_check_and_unscale_cuda"
+    # not implemented for 'BFloat16'). 학습 파라미터를 fp32로 되돌린다
+    # (fp16 AMP + fp32 LoRA 파라미터가 QLoRA 표준 조합).
+    n_cast = 0
+    for p in trainer.model.parameters():
+        if p.requires_grad and p.dtype == torch.bfloat16:
+            p.data = p.data.float()
+            n_cast += 1
+    print(f"[train] upcast {n_cast} trainable bf16 params to fp32 (T4 fp16 AMP fix)")
+
     if args.resume:
         # resume 가드: 체크포인트가 실제로 있을 때만 재개(없으면 크래시 방지).
         ckpts = glob.glob(os.path.join(args.output_dir, "checkpoint-*"))
