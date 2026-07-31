@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 데이터 (KorQuAD CC BY-ND — 원문·가공본 커밋 금지, Anti-ISC-5)
+data/
+*.parquet
+korquad*.json
+squad_kor*
+# 예측 파일 — 데이터셋 정답 재배포 회피(보수적)
+results/predictions_*.json
+
+# 학습 산출물 (Drive에 저장 — 어댑터는 adapters/에만 선별 커밋)
+checkpoints/
+output/
+runs/
+wandb/
+
+# 로그
+*.log
+probe.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
