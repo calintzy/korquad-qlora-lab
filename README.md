@@ -1,49 +1,61 @@
 # korquad-qlora-lab
 
-Qwen2.5-1.5B-Instruct를 KorQuAD 1.0으로 QLoRA 파인튜닝하고, 한국어 추출형 QA에서 EM/F1이 실제로 오르는지 before/after로 측정하는 실습.
+작은 한국어 모델을 파인튜닝하면 점수가 실제로 얼마나 움직일까. 그걸 무료 GPU로 직접 재본 실습 리포다. 이름 그대로 **KorQuAD**(한국어 독해 QA 벤치마크)에 **QLoRA**(4bit 양자화 + LoRA)를 적용해 본 **lab**(실습)이다.
 
-## 왜
+| | EM | F1 | n |
+|---|---|---|---|
+| 파인튜닝 전 (제로샷) | 38.6 | 62.77 | 1,000 |
+| 파인튜닝 후 (1,000스텝) | **81.7** | **91.65** | 1,000 |
+| 변화 | **+43.1** | **+28.88** | |
 
-<!-- TODO(자리표시자): 파인튜닝 학습을 직접 손으로 돌려본 경험을 만들기 위한 실습이라는 동기를, 구체적 사건 중심으로 1문단 산문으로 채운다. -->
+## 왜 만들었나
+
+채용 공고를 훑다 보면 우대사항에 "LLM 파인튜닝 경험"이 자주 보인다. RAG 파이프라인은 만들어 봤지만([mycelium](https://github.com/calintzy/mycelium)) 모델 자체를 학습시켜 본 적은 없었다. 그래서 지출 0원, 1~2주 범위로 끝나는 실습 하나를 설계했다. 작은 한국어 모델을 골라 공개 벤치마크로 학습 전 점수를 재고, 파인튜닝하고, 같은 문항으로 다시 재는 것. 결과가 좋든 나쁘든 숫자 두 쌍이 남는다.
+
+QLoRA를 쓰면 무료 GPU(Colab/Kaggle T4 16GB)로도 이게 된다. 모델 본체는 4bit로 압축해 얼려두고, 옆에 붙인 작은 어댑터만 학습하는 방식이다. 안경 도수를 새로 깎는 대신 클립형 보정 렌즈만 끼우는 셈이라 학습 대상 파라미터가 전체의 1% 미만으로 줄어든다.
 
 ## 방법
 
-- **모델**: `Qwen/Qwen2.5-1.5B-Instruct` (T4 무료 티어에서 4bit로 로드)
-- **데이터**: `KorQuAD/squad_kor_v1` (한국어 추출형 QA)
-- **QLoRA**: 4bit(nf4, double-quant, compute dtype fp16) 베이스 + LoRA(r=16, alpha=32, dropout=0.05), 어텐션·MLP 프로젝션 전체를 타깃
-- **학습**: `trl` SFTTrainer, conversational 포맷 + `assistant_only_loss`, cosine 스케줄, paged 8bit optimizer
-- **평가**: KorQuAD 1.0 공식 문자 단위 EM/F1 채점기(`src/evaluate_korquad.py`)로 채점. before(제로샷)와 after(어댑터)는 어댑터 유무만 다른 동일 경로
+| 항목 | 선택 | 이유 |
+|---|---|---|
+| 모델 | [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) | Apache-2.0에 접근 제한이 없는 유일한 1~3B급 후보. 한국어 특화 모델들(EXAONE, kanana)은 비상업 라이선스 |
+| 데이터 | [KorQuAD 1.0](https://korquad.github.io/category/1.0_KOR.html) (`KorQuAD/squad_kor_v1`) | train 60,407건으로만 학습, dev 5,774건으로만 평가. 경계를 섞지 않는다 |
+| 학습 | QLoRA (bitsandbytes 4bit nf4 + LoRA r=16) + trl `SFTTrainer` | `assistant_only_loss=True`로 정답 토큰에만 손실을 건다. 지문 베껴 쓰기에 학습 신호를 낭비하지 않기 위해서다 |
+| 평가 | KorQuAD 공식 `evaluate-v1.0.py` 로직 이식 ([src/evaluate_korquad.py](src/evaluate_korquad.py)) | 공식 채점기는 **문자 단위 F1**이다. HuggingFace `evaluate`의 `squad` 메트릭은 영어식 단어 단위라 한국어 조사 변이("베토벤" vs "베토벤이")에서 점수가 왜곡된다 |
+| 생성 | greedy (`do_sample=False`), 좌측 패딩 배치 생성 | 재현성. 샘플링 없이 같은 입력이면 같은 출력 |
+| 평가셋 | dev에서 고정 시드(42) 1,000문항 | 무료 GPU 세션 시간 제약. 전/후가 같은 문항을 쓰도록 인덱스를 파일로 고정 |
 
-### 동일성 계약
+학습과 평가가 같은 프롬프트를 쓰도록 `src/data.py`의 `build_prompt()` 하나를 양쪽이 공유한다. 학습 때와 평가 때 프롬프트가 다르면 파인튜닝 효과가 사라져도 원인을 알 수 없게 되기 때문에, 이건 코드 구조로 강제했다.
 
-프롬프트 문구는 `src/data.py`의 `build_prompt` 한 곳에만 존재한다. `train.py`와 `eval_run.py`가 모두 이 함수를 호출하므로, before/after 비교의 변수는 "어댑터 유무" 하나뿐이다.
+## 결과에서 확인한 것
 
-## 결과
+- **EM 38.6 → 81.7.** 1,000스텝(전체 train의 약 27%) 부분 학습만으로 정확 일치율이 두 배 넘게 올랐다. 제로샷에서는 EM(38.6)과 F1(62.77)의 간극이 컸다. 정답 문자열 근처까지는 가는데 그대로 뽑아내지는 못한다는 뜻이다. 파인튜닝 후에는 그 간극이 좁아진다(81.7 vs 91.65).
+- **측정이 재현된다.** 제로샷 평가를 Colab T4와 Kaggle T4에서 각각 돌렸는데 F1이 소수점 14자리까지 같았다(62.76924774763779). 고정 시드 서브셋 + greedy 생성 + 결정적 채점기 조합이 플랫폼을 바꿔도 같은 숫자를 낸다는 교차 확인이다.
 
-| 구분 | EM | F1 | n |
-|------|----|----|---|
-| before (제로샷) | TBD | TBD | TBD |
-| after (QLoRA)   | TBD | TBD | TBD |
+## 겪은 문제들
 
-<!-- TODO(자리표시자): Colab 노트북 S2/S4 실행 후 실제 수치로 교체. -->
+- **T4에서 bf16 크래시.** trl은 양자화 모델의 LoRA 파라미터를 bf16으로 자동 캐스팅하는데, T4의 fp16 GradScaler에는 bf16 그래디언트를 처리하는 커널이 없어 첫 스텝에서 죽는다(`_amp_foreach_non_finite_check_and_unscale_cuda not implemented`). 본 학습 전에 1스텝짜리 스모크 테스트를 게이트로 뒀던 덕에 일찍 잡았고, 학습 파라미터를 fp32로 되돌려 해결했다([src/train.py](src/train.py)).
+- **긴 지문이 정답을 잘라먹는 문제.** max_length 초과 시퀀스를 뒤에서 자르면, 대화 포맷에서 맨 뒤에 오는 정답 토큰이 날아가 해당 예제는 학습 신호가 0이 된다. 코드 리뷰에서 잡혀서 초과 예제(491건, 0.8%)를 학습에서 제외했다.
+- **Colab 무료의 한계.** 브라우저가 잠들면 세션이 끊기고, 사용량 한도는 비공개다. 학습이 두 번 끊긴 뒤 Kaggle Notebooks의 백그라운드 실행(Save & Run All)으로 옮겨 무인 완주했다. 재현할 거면 처음부터 Kaggle을 권한다.
 
-## 정직한 한계
+## 한계 (정직하게)
 
-<!-- TODO(자리표시자): 서브셋 평가 여부, 1 에폭 학습, 1.5B 소형 모델, greedy 디코딩 등 결과 해석 시 감안할 점을 채운다. -->
-
-## 고지
-
-- 학습에는 KorQuAD 1.0(CC BY-ND)을 사용했으나, **데이터셋 자체는 이 리포에 재배포하지 않는다.**
-- 코드와 학습된 어댑터 가중치는 Apache-2.0으로 배포한다.
+- 1에폭이 아니라 **1,000스텝 부분 학습**이다. 더 돌리면 더 오를 수도, 과적합할 수도 있다. 여기서는 재지 않았다.
+- 평가는 dev 전체(5,774)가 아니라 **1,000문항 서브셋**이다. 시드가 고정이라 전/후 비교는 공정하지만, 전체 dev 점수와는 다를 수 있다.
+- 단일 시드, 단일 실행이다. 분산은 재지 않았다.
+- 문자 단위 F1은 단어 단위보다 관대한 지표다. 공식 채점기 방식 그대로지만, 다른 논문의 단어 단위 F1과 직접 비교하면 안 된다.
+- 이 리포는 어디까지나 **학습 목적의 실습**이다. 업무로 파인튜닝을 해 봤다는 주장이 아니다.
 
 ## 재현 방법
 
-Colab 무료 T4에서 `notebooks/qlora_finetune.ipynb`를 순서대로 실행한다.
+어댑터 가중치는 리포에 넣지 않았다. 대신 전 과정이 노트북 한 번 실행으로 재현된다.
 
-- **S0**: GPU 확인 → 의존성 설치 → import·4bit 로딩·1-step 학습 스모크
-- **S1**: 채점기 자가검증 + 데이터 로드 확인
-- **S2**: 제로샷 평가(before)
-- **S3**: QLoRA 본 학습(+ 재개 셀)
-- **S4**: 파인튜닝 후 평가(after) + before/after 표 출력
+- **Kaggle (권장)**: [notebooks/kaggle_run_all.ipynb](notebooks/kaggle_run_all.ipynb)를 Import → Accelerator `GPU T4 x2`, Internet On → **Save & Run All**. 무료이고 약 4시간 걸리는데, 백그라운드로 돌아서 지켜볼 필요가 없다. 끝나면 Output에 결과 JSON과 어댑터가 남는다.
+- **Colab**: [notebooks/qlora_finetune.ipynb](notebooks/qlora_finetune.ipynb)를 열고 위에서부터 실행. 세션이 끊겨도 이어갈 수 있게 Drive 백업 셀과 재개 셀이 들어 있다.
 
-노트북 내 로직은 최소화되어 있고, 단일 진실은 `src/` 스크립트다.
+평가 서브셋 인덱스는 고정 시드로 생성되므로 재실행 시 자동으로 같은 1,000문항이 선택된다. 노트북 내 로직은 최소화되어 있고, 단일 진실은 `src/` 스크립트다.
+
+## 고지
+
+- 학습과 평가에 KorQuAD 1.0(CC BY-ND 2.0 KR)을 사용했다. **데이터셋 원문과 가공본은 이 리포에 포함하지 않으며 재배포하지 않는다.**
+- 코드는 Apache-2.0이다. 채점기(`src/evaluate_korquad.py`)는 KorQuAD 공식 평가 스크립트를 이식한 것으로 파일 상단에 출처를 명시했다.
